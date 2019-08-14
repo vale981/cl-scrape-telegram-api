@@ -9,7 +9,7 @@ transformed into lisp `functions` and `classes` to be used in the
  1. Use the command line utility `generate-api.ros [output-file]
 [api-url]` with both args optional.
  2. Load the system in the repl and execute `(tg-scrape:scrape-to-disk)`.
-    ```lisp
+    ```common-lisp
     (ql:quickload :cl-scrape-telegram-api)
     (tg-scrape:scrape-to-disk :out-file "file.lisp")
     ```
