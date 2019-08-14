@@ -4,8 +4,9 @@
 exec ros -Q -- $0 "$@"
 |#
 
-(load "./utils.lisp")
-(load "./scrape.lisp")
+(push #p"./" asdf:*central-registry*)
+(ql:quickload "cl-scrape-telegram-api")
 (in-package :space.protagon.cl-telegram-scrape)
-(defun main (out-file &optional (api-url *url*))
+(defun main (&optional (out-file *out-file*) (api-url *url*))
+  (format t "Writing generated file to ~a.~%" out-file)
   (scrape-to-disk :out-file out-file :url api-url))

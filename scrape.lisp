@@ -8,20 +8,19 @@
 (defvar *out-file* "out/out.lisp")
 
 ;; Unimportant categories
-(defconstant +unimportant-categories+ #("Recent Changes"
+(defparameter *unimportant-categories* #("Recent Changes"
                                        "Authorizing your bot"
                                        "Making requests"
                                        "Getting updates"
                                        "Payments"))
 
-(defconstant +type-map+
+(defparameter *type-map*
   '(("Integer" . integer)
     ("String" . string)
     ("Boolean" . boolean)))
 
-(defconstant +blacklist+
-  #("Formatting options" "Inline mode methods" "CallbackGame")
-  "Headers not to be mistaken for methods or types.")
+(defparameter *blacklist*
+    #("Formatting options" "Inline mode methods" "CallbackGame"))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
                                         ;              Structures             ;
@@ -55,7 +54,7 @@
   (let ((cat-data
           (remove-if
            #'(lambda (el)
-               (find (lquery-funcs:text el) +unimportant-categories+ :test 'string-equal))
+               (find (lquery-funcs:text el) *unimportant-categories* :test 'string-equal))
            (lquery:$ *parsed-content* "#dev_page_content h3"))))
     (map 'list #'(lambda (el) (cons (lquery-funcs:text el) el)) cat-data)))
 
@@ -64,7 +63,7 @@
   (let ((types (ppcre:split " or " type-str)))
     (mapcar #'(lambda (single-type)
                 (let* ((is-array (search "Array of " single-type))
-                       (type (assoc single-type +type-map+ :test #'string=)))
+                       (type (assoc single-type *type-map* :test #'string=)))
                   (if is-array nil      ;todo support arrays
                       (if type
                           (cdr type)
@@ -116,7 +115,7 @@
   (let ((name (lquery:$1 h4 (text))))
     (when (or (not (and (lquery:$ h4 (is "h4"))
                    (lquery:$ h4 (next) (is "p"))))
-             (find name +blacklist+ :test #'string=))
+             (find name *blacklist* :test #'string=))
       (return-from parse-h4 nil))
 
     (let* ((anchor (lquery:$1 h4 "a" (attr :href)))
@@ -257,6 +256,8 @@
 
 (defun generate-and-write-functions ()
   "Discovers and generates methods from the telegram api as funcions and writes them to a file."
+  (ensure-directories-exist *out-file*)
+
   (with-open-file (out *out-file* :direction :output :if-exists :supersede)
     (write-file-header out)
     (-> (find-categories) (parse-categories) (print-objects out))))
