@@ -1,11 +1,3 @@
-(ql:quickload '(:alexandria :cl-arrows :cl-json :cl-ppcre))
-(defpackage :space.protagon.cl-telegram-scrape.utils
-  (:use :common-lisp :alexandria :cl-arrows)
-  (:export :lispify
-   :telegramify
-           :camel->symbol
-   :snake->keyword
-           :snake->symbol))
 (in-package :space.protagon.cl-telegram-scrape.utils)
 
 (defun lispify (str)
