@@ -4,23 +4,27 @@
 (defvar *url* "https://core.telegram.org/bots/api")
 (defvar *request* "")
 (defvar *parsed-content* nil)
-(defvar *out-package* :space.protagon.cl-telegram)
+(defvar *out-package* :cl-telegram-bot-api)
 (defvar *out-file* "out/out.lisp")
 
 ;; Unimportant categories
 (defparameter *unimportant-categories* #("Recent Changes"
                                        "Authorizing your bot"
                                        "Making requests"
-                                       "Getting updates"
-                                       "Payments"))
+                                         "Payments"))
 
 (defparameter *type-map*
   '(("Integer" . integer)
     ("String" . string)
-    ("Boolean" . boolean)))
+    ("Boolean" . boolean)
+    ("Float number" . float)
+    ("True" . nil)
+    ("False" . nil)))
 
 (defparameter *blacklist*
-    #("Formatting options" "Inline mode methods" "CallbackGame"))
+  #("Formatting options" "Inline mode objects" "Sending files" "Inline mode methods" "CallbackGame"
+    "InputFile"
+    "getUpdates"))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
                                         ;              Structures             ;
@@ -37,12 +41,13 @@
 
 
 (defstruct (tg-object
-            (:constructor create-tg-object (name parameters doc anchor type)))
+            (:constructor create-tg-object (name parameters doc anchor type return-type)))
   (name "" :type string)
   (type "" :type keyword)
   (parameters nil :type vector)
   (doc "" :type string)
-  (anchor "" :type string))
+  (anchor "" :type string)
+  (return-type))
 
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -63,11 +68,16 @@
   (let ((types (ppcre:split " or " type-str)))
     (mapcar #'(lambda (single-type)
                 (let* ((is-array (search "Array of " single-type))
-                       (type (assoc single-type *type-map* :test #'string=)))
-                  (if is-array nil      ;todo support arrays
-                      (if type
-                          (cdr type)
-                          (camel->symbol single-type)))))
+                       (el-type (if is-array
+                                    (elt (nth-value 1 (ppcre:scan-to-strings "Array of (\\S+)" single-type)) 0)
+                                    single-type))
+                       (type (assoc el-type *type-map* :test #'string=))
+                       (type-symbol (if type
+                                        (cdr type)
+                                        (camel->symbol el-type))))
+                  (if is-array
+                      `(array ,type-symbol)
+                      type-symbol)))
             types)))
 
 (defun parse-parameters (param-table)
@@ -96,7 +106,7 @@
           #'(lambda (el)
               (match el
                 ((array :rank 1 :contents (name type desc))
-                 (multiple-value-bind (doc optional) (ppcre:regex-replace "Optional\\. " desc "")
+                 (multiple-value-bind (doc optional) (ppcre:regex-replace "Optional\\.* " desc "")
                    (make-tg-param :name name
                                   :type (tg-type->lisp-type type)
                                   :optional optional
@@ -109,6 +119,23 @@
     (4 :method)
     (otherwise :method)))
 
+(defun find-return-type (doc)
+      (let* ((ret-sent
+               (first
+                (remove-if-not
+                 #'(lambda (el)
+                     (search "RETURN" (string-upcase el)))
+                 (ppcre:split "[\\.,]\\s" doc))))
+             (href (nth-value 1 (ppcre:scan-to-strings "href=\"#([a-zA-Z]+?)\">"
+                                                       ret-sent))))
+        (when (and href (> (length href) 0))
+          (let* ((anchor (elt href 0))
+                 (selector (concatenate 'string "h4>a[href=\"#" anchor "\"]")))
+            (lquery:$1 *parsed-content*
+              selector
+              (parent)
+              (text))))))
+
 (defun parse-h4 (h4)
   "Parses an H4 into a method or a struct."
   (declare (type plump-dom:element h4))
@@ -118,19 +145,25 @@
              (find name *blacklist* :test #'string=))
       (return-from parse-h4 nil))
 
+
+
     (let* ((anchor (lquery:$1 h4 "a" (attr :href)))
            (doc-elt (lquery:$1 h4 (next)))
-           (doc (lquery:$1 doc-elt (text))))
-      (h4->tg-object h4 name anchor doc))))
+           (doc (lquery:$1 doc-elt (text)))
+           (return-type (find-return-type (lquery:$1 doc-elt (serialize)))))
+      (h4->tg-object h4 name anchor doc return-type))))
 
 (defun has-table-p (h4)
   "Checks if there is a corresponding table to a h4."
   (emptyp (lquery:$ h4 (next-until "table") (filter "h4"))))
 
-(defun h4->tg-object (h4 name anchor doc)
+(defun h4->tg-object (h4 name anchor doc return-type)
   (declare (type plump-dom:element h4))
   (let* ((table (lquery:$ h4 (next-until "table") (next)))
-         (type (detect-api-type table))
+         (has-table (has-table-p h4))
+         (type (if has-table
+                   (detect-api-type table)
+                   :method))
          (params (if (has-table-p h4)
                      (case type
                        (:method
@@ -138,7 +171,7 @@
                        (:object
                         (parse-fields table)))
                      #())))
-    (create-tg-object name params doc anchor type)))
+    (create-tg-object name params doc anchor type return-type)))
 
 (defun parse-categories (categories)
   "Parses the given categorues into a `tg-method` returning an alist of (name . (vektor of parsed))."
@@ -172,7 +205,7 @@
 
 (defun param->arg (param)
   "Converts a TG-PARAM into a symbol to be used as argument.n"
-  (-> (tg-param-name param) (snake->symbol)))
+  (-> (tg-param-name param) (json:camel-case-to-lisp) (intern)))
 
 (defun tg-object->lisp (object)
   (let* ((name (tg-object-name object))
@@ -182,9 +215,10 @@
          (req-args (first sep-params))
          (opt-args (second sep-params))
          (type (tg-object-type object))
+         (return-type (tg-object-return-type object))
          (docstring (make-docstring-from-tg-object object)))
     (case type
-      (:method (tg-object->function name name-sym req-args opt-args docstring))
+      (:method (tg-object->function name name-sym req-args opt-args docstring return-type))
       (:object (tg-object->clos name name-sym params docstring)))))
 
 (defun make-docstring-from-tg-object (object)
@@ -193,55 +227,89 @@
 (defun make-argument-list (req-args opt-args)
   `(,@(map 'list #'param->arg req-args) ,@(if opt-args `(&key ,@(map 'list #'param->arg opt-args)))))
 
-(defun tg-object->function (name name-sym req-args opt-args docstring)
+(defun make-type-specifier (type)
+  (if (> (length type) 1) `((or ,@type)) type))
+
+(defun tg-object->function (name name-sym req-args opt-args docstring return-type)
   "Creates a function for use in `cl-telegram-bot` from a tg-object."
   `(defun ,name-sym (bot ,@(make-argument-list req-args opt-args))
      ,docstring
      ,@(mapcar
         #'(lambda (opt)
-            (when (tg-param-type opt)
-              `(check-type ,(param->arg opt) (or ,@(tg-param-type opt)))))
+            (let ((type (tg-param-type opt)))
+              (when type
+                `(check-type ,(param->arg opt) ,@(make-type-specifier type)))))
         req-args)
      (let ((options
-             (list
-              ,@(mapcar #'(lambda (opt)
-                            `(cons ,(param->keyword opt)
-                                   ,(param->arg opt)))
-
-                        req-args))))
+             (list ,@(mapcar #'(lambda (opt)
+                                 `(cons ,(param->keyword opt)
+                                        ,(param->arg opt)))
+                             req-args))))
        ,@(mapcar #'(lambda (param)
                      `(when ,(param->arg param)
                         (nconc options (list (cons ,(param->keyword param) ,(param->arg param))))))
                  opt-args)
-       (make-request bot ,name options))))
+       (make-request bot ,name options ,@(when return-type
+                                           `(:return-type (quote ,(camel->symbol return-type))))))))
 
+;; (make-request bot ,name options ,@(when return-type
+;;                                            (let ((ret-sym (camel->symbol (car return-type))))
+;;                                              `(:return-type
+;;                                                ,(if (cdr return-type)
+;;                                                     `(quote (array ,ret-sym))
+;;                                                     `(quote ,ret-sym))))))
 ;; TODO: convert name to kw, symbol directly in class
 
 (defun tg-object->clos (name name-sym params docstring)
   "Creates clos object from a tg-object."
   `(defclass ,name-sym ()
-    ((type-name :allocation :class
-           :reader name
-           :initform ,name)
-     ,@(map 'list #'(lambda (param)
-                      (let* ((pname-sym (param->arg param))
-                             (pname-kw (make-keyword pname-sym))
-                             (optional (tg-param-optional param))
-                             (type (tg-param-type param))
-                             (doc (tg-param-desc param)))
-                        `(,pname-sym
-                          :initarg ,pname-kw
-                          ,@(when optional
-                              '(:initform nil))
-                          :accessor ,pname-sym
-                          :type (or ,@type)
-                          :documentation ,doc)))
-            params))
-    (:documentation ,docstring)))
+     ((type-name :allocation :class
+                 :reader name
+                 :initform ,name)
+      ,@(map 'list #'(lambda (param)
+                       (let* ((pname-sym (param->arg param))
+                              (pname-kw (make-keyword pname-sym))
+                              (optional (tg-param-optional param))
+                              (type (tg-param-type param))
+                              (doc (tg-param-desc param)))
+                         `(,pname-sym
+                           :initarg ,pname-kw
+                           ,@(when optional
+                               '(:initform nil))
+                           :accessor ,(intern (concatenate 'string "TG-" (symbol-name pname-sym)))
+                           :type ,@(make-type-specifier type)
+                           :documentation ,doc)))
+             params))
+     (:documentation ,docstring)))
 
 
-(defun write-file-header (stream)
-  (write `(in-package ,*out-package*) :stream stream))
+
+(defun write-file-header (categories stream)
+  (format stream "; DO NOT EDIT, AUTO GENERATED~%~%")
+  (write `(defpackage ,*out-package*
+            (:use :cl)
+            (:export
+             ,@(let ((symbols nil))
+                 (dolist (item categories)
+                   (let ((objects (cdr item)))
+                     (dolist (object objects)
+                       (push (make-keyword (camel->symbol (tg-object-name object))) symbols))))
+                 (nreverse symbols))))
+         :stream stream)
+  (format stream "~%")
+  (write `(in-package ,*out-package*) :stream stream)
+  (format stream "~%")
+  (write `(defparameter *API-TYPES*
+            (quote
+             ,(let ((symbols nil))
+                (dolist (item categories)
+                  (let ((objects (cdr item)))
+                    (dolist (object objects)
+                      (when (eq :object (tg-object-type object))
+                        (push (camel->symbol (tg-object-name object)) symbols)))))
+                (nreverse symbols))))
+         :stream stream)
+  categories)
 
 (defun print-objects (parsed-cats stream)
   "Takes parsed categories and prints them out to functions."
@@ -259,8 +327,7 @@
   (ensure-directories-exist *out-file*)
 
   (with-open-file (out *out-file* :direction :output :if-exists :supersede)
-    (write-file-header out)
-    (-> (find-categories) (parse-categories) (print-objects out))))
+    (-> (find-categories) (parse-categories) (write-file-header out) (print-objects out))))
 
 (defun scrape-to-disk (&key (url *url*) (out-file *out-file*) (out-package *out-package*))
   "Main entry. Makes the web request and scrapes the telegram api docs."
