@@ -4,7 +4,7 @@
 (defvar *url* "https://core.telegram.org/bots/api")
 (defvar *request* "")
 (defvar *parsed-content* nil)
-(defvar *out-package* :cl-telegram-bot-api)
+(defvar *out-package* :cl-telegram-bot)
 (defvar *out-file* "out/out.lisp")
 
 ;; Unimportant categories
@@ -23,8 +23,7 @@
 
 (defparameter *blacklist*
   #("Formatting options" "Inline mode objects" "Sending files" "Inline mode methods" "CallbackGame"
-    "InputFile"
-    "getUpdates"))
+    "InputFile" "InputMedia"))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
                                         ;              Structures             ;
@@ -68,16 +67,24 @@
   (let ((types (ppcre:split " or " type-str)))
     (mapcar #'(lambda (single-type)
                 (let* ((is-array (search "Array of " single-type))
-                       (el-type (if is-array
-                                    (elt (nth-value 1 (ppcre:scan-to-strings "Array of (\\S+)" single-type)) 0)
-                                    single-type))
-                       (type (assoc el-type *type-map* :test #'string=))
-                       (type-symbol (if type
-                                        (cdr type)
-                                        (camel->symbol el-type))))
+                       (el-types (if is-array
+                                     (let* ((single-type (ppcre:regex-replace-all "Array of " single-type "")))
+                                       (ppcre:split " and " single-type))
+                                     `(,single-type)))
+                       (types (mapcar #'(lambda (el)
+                                          (assoc el *type-map* :test #'string=))
+                                      el-types))
+                       (type-symbols (mapcar
+                                      #'(lambda (type el-type)
+                                          (if type
+                                              (cdr type)
+                                              (camel->symbol el-type)))
+                                      types el-types)))
                   (if is-array
-                      `(array ,type-symbol)
-                      type-symbol)))
+                      `(array ,(if (> (length type-symbols) 1)
+                                   `(or ,@type-symbols)
+                                   (car type-symbols)))
+                      (car type-symbols))))
             types)))
 
 (defun parse-parameters (param-table)
@@ -232,7 +239,7 @@
 
 (defun tg-object->function (name name-sym req-args opt-args docstring return-type)
   "Creates a function for use in `cl-telegram-bot` from a tg-object."
-  `(defun ,name-sym (bot ,@(make-argument-list req-args opt-args))
+  `(defun ,name-sym ,(make-argument-list req-args opt-args)
      ,docstring
      ,@(mapcar
         #'(lambda (opt)
@@ -247,10 +254,10 @@
                              req-args))))
        ,@(mapcar #'(lambda (param)
                      `(when ,(param->arg param)
-                        (nconc options (list (cons ,(param->keyword param) ,(param->arg param))))))
+                        (setf options (nconc options (list (cons ,(param->keyword param) ,(param->arg param)))))))
                  opt-args)
-       (make-request bot ,name options ,@(when return-type
-                                           `(:return-type (quote ,(camel->symbol return-type))))))))
+       (list ,name options ,@(when return-type
+                               `(:return-type (quote ,(camel->symbol return-type))))))))
 
 ;; (make-request bot ,name options ,@(when return-type
 ;;                                            (let ((ret-sym (camel->symbol (car return-type))))
@@ -274,7 +281,7 @@
                               (doc (tg-param-desc param)))
                          `(,pname-sym
                            :initarg ,pname-kw
-                           ,@(when optional
+                           ,@(unless optional
                                '(:initform nil))
                            :accessor ,(intern (concatenate 'string "TG-" (symbol-name pname-sym)))
                            :type ,@(make-type-specifier type)
@@ -282,13 +289,11 @@
              params))
      (:documentation ,docstring)))
 
-
-
 (defun write-file-header (categories stream)
   (format stream "; DO NOT EDIT, AUTO GENERATED~%~%")
   (write `(defpackage ,*out-package*
-            (:use :cl)
             (:export
+             :*API-TYPES*
              ,@(let ((symbols nil))
                  (dolist (item categories)
                    (let ((objects (cdr item)))
@@ -296,7 +301,7 @@
                        (push (make-keyword (camel->symbol (tg-object-name object))) symbols))))
                  (nreverse symbols))))
          :stream stream)
-  (format stream "~%")
+
   (write `(in-package ,*out-package*) :stream stream)
   (format stream "~%")
   (write `(defparameter *API-TYPES*
@@ -309,6 +314,18 @@
                         (push (camel->symbol (tg-object-name object)) symbols)))))
                 (nreverse symbols))))
          :stream stream)
+  (format stream "~%")
+  (write `(defparameter *API-METHODS*
+            (quote
+             ,(let ((symbols nil))
+                (dolist (item categories)
+                  (let ((objects (cdr item)))
+                    (dolist (object objects)
+                      (when (eq :method (tg-object-type object))
+                        (push (camel->symbol (tg-object-name object)) symbols)))))
+                (nreverse symbols))))
+         :stream stream)
+    (format stream "~%")
   categories)
 
 (defun print-objects (parsed-cats stream)
